@@ -17,159 +17,81 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+// wiggleball for the Ploopy Nano 2 (QMK target: ploopyco/nano_2/rev2_003)
+
 #include QMK_KEYBOARD_H
-/*
-#define MATRIX_ROWS 1
-#define MATRIX_COLS 1
-#define DIRECT_PINS {    { D0 }  }
-*/
-// Dummy
-const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = { [0]=LAYOUT(MOUSE_BTN1) };
 
-// enum custom_keycodes {
-//     DRAG_SCROLL = SAFE_RANGE,
-// };
+// The Nano 2's single button is a left click.
+const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
+    [0] = LAYOUT( MS_BTN1 )
+};
 
-bool set_scrolling = false;
+// --- tuning ---------------------------------------------------------------
 
+// Wiggle: this many left/right direction changes in a row toggle scroll mode.
+#define WIGGLE_FLIPS 4
+// Each direction change must follow the previous one within this time.
+#define WIGGLE_TIMEOUT_MS 150
+// After a toggle, ignore wiggles for this long.
+#define WIGGLE_COOLDOWN_MS 250
+// Minimum horizontal movement in one report for it to count as a wiggle stroke.
+#define WIGGLE_MIN_X 2
 
+// Sensor counts per scroll wheel tick. Higher = slower scrolling.
+#define SCROLL_DIVISOR 64
 
-unsigned long time;
+// ---------------------------------------------------------------------------
 
-
-bool PloopyAcceleration = false;
-bool PloopyNumlockScroll = false;
-int16_t PloopyNumlockScrollVDir = 1;
-
-int scrollX=0;
-int scrollY=0;
-
-int countShake=0;
-bool lastDir=false;
-int lastShake=0;
-int lastShakeSwitch=0;
+static bool     scroll_mode    = false;
+static bool     last_dir_right = false;
+static uint8_t  flip_count     = 0;
+static uint32_t last_flip      = 0;
+static uint32_t last_toggle    = 0;
+static int32_t  scroll_x       = 0;
+static int32_t  scroll_y       = 0;
 
 report_mouse_t pointing_device_task_user(report_mouse_t mouse_report) {
+    int16_t x = mouse_report.x;
+    int16_t y = mouse_report.y;
 
     // wiggle ball detection
-    if(timer_read()-lastShakeSwitch>250)
-    {
-
-        if(timer_read()-lastShake>150)countShake=0;
-
-        if(mouse_report.x> 1 && mouse_report.y<3 && !lastDir)
-        {
-            countShake++;
-            lastShake=timer_read();
-            lastDir=!lastDir;
-        }
-        if(mouse_report.x<-1 && mouse_report.y<3 && lastDir)
-        {
-            countShake++;
-            lastShake=timer_read();
-            lastDir=!lastDir;
+    if (timer_elapsed32(last_toggle) > WIGGLE_COOLDOWN_MS) {
+        if (timer_elapsed32(last_flip) > WIGGLE_TIMEOUT_MS) {
+            flip_count = 0;
         }
 
-        if(countShake>3)
-        {
-            set_scrolling=!set_scrolling;
-            countShake=0;
-            lastShake=timer_read();
-            lastShakeSwitch=timer_read();
+        // A stroke counts when it is mostly horizontal and reverses the
+        // direction of the previous stroke.
+        bool horizontal = abs(x) >= WIGGLE_MIN_X && abs(x) > abs(y);
+        if (horizontal && (x > 0) != last_dir_right) {
+            last_dir_right = !last_dir_right;
+            flip_count++;
+            last_flip = timer_read32();
+        }
+
+        if (flip_count >= WIGGLE_FLIPS) {
+            scroll_mode = !scroll_mode;
+            flip_count  = 0;
+            scroll_x    = 0;
+            scroll_y    = 0;
+            last_toggle = timer_read32();
         }
     }
 
-    bool doScroll = set_scrolling || host_keyboard_led_state().caps_lock|| host_keyboard_led_state().num_lock;
+    led_t leds = host_keyboard_led_state();
+    if (scroll_mode || leds.caps_lock || leds.num_lock) {
+        scroll_x += x;
+        scroll_y += y;
 
+        // Ball right = scroll right, ball down = scroll down.
+        mouse_report.h = scroll_x / SCROLL_DIVISOR;
+        mouse_report.v = -(scroll_y / SCROLL_DIVISOR);
+        scroll_x %= SCROLL_DIVISOR;
+        scroll_y %= SCROLL_DIVISOR;
 
-    if (doScroll) {
-        // Scroll is very sensitive if you use the default values.
-        // We can't divide it by anything to reduce the sensitivity, cause that would zero out small input values.
-        // Instead we simply want either a 0, 1, or -1 depending on the input value's sign.
-        // x = (x > 0 ? 1 : (x < 0 ? -1 : 0));
-        // y = PloopyNumlockScrollVDir * (y > 0 ? 1 : (y < 0 ? -1 : 0));
-        // mouse_report.v = x;
-        // mouse_report.h = y;
-
-		scrollX+=mouse_report.x;
-		scrollY+=mouse_report.y;
-
-		if(scrollX>150)
-			{
-				mouse_report.h=1;
-				scrollX=0;
-			}
-		if(scrollX<-150)
-			{
-				mouse_report.h=-1;
-				scrollX=0;
-			}
-		if(scrollY>150)
-			{
-				mouse_report.v=-1;
-				scrollY=0;
-			}
-		if(scrollY<-150)
-			{
-				mouse_report.v=1;
-				scrollY=0;
-			}
-
-        // if(mouse_report.x!=0)
-        // {
-        //     if(mouse_report.x>0)mouse_report.h=step;
-        //     else mouse_report.h=-step;
-        // }
-
-        // if(mouse_report.y!=0)
-        // {
-        //     if(mouse_report.y>0)mouse_report.v=-step;
-        //     else mouse_report.v=step;
-        // }
-
-	    mouse_report.x = 0;
-	    mouse_report.y = 0;
-
-
-        return mouse_report;
+        mouse_report.x = 0;
+        mouse_report.y = 0;
     }
-
-    // if (PloopyAcceleration) {
-    //     // Testing revealed the max reasonable x/y values were ~16.
-    //     // `x*x/16 + x` results in ~2x speed at the max value, while maintaining 1x speed at the minimum.
-    //     // But the x*x cancels the sign, so we need to negate it if the input value is negative.
-    //     x = (x > 0 ? x*x/16+x : -x*x/16+x);
-    //     y = (y > 0 ? y*y/16+y : -y*y/16+y);
-    // }
-
-    // mouse_report.x = x;
-    // mouse_report.y = y;
 
     return mouse_report;
 }
-
-
-// Function to handle key events and enable/disable drag scrolling
-bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-
-
-    switch (keycode) {
-        case MOUSE_BTN1:
-        	set_scrolling = !set_scrolling;//record->event.pressed;
-            break;
-        default:
-            break;
-    }
-    return true;
-}
-
-
-
-
-
-
-
-
-
-
-
